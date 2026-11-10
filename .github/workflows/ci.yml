@@ -1,18 +1,12 @@
 name: CI
 
 on:
-  push:
-    branches:
-     - main
-     - next
-     - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional tape test file(s) to run instead of the full suite'
+        required: false
+        default: ''
 
 # This allows a subsequently queued workflow run to interrupt previous runs
 concurrency:
@@ -26,6 +20,7 @@ jobs:
   test-regression-check-node10:
     name: Test compatibility with Node.js 10
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -51,22 +46,29 @@ jobs:
           cp -r ./lib ./node_modules/fast-uri/lib &&
           cp ./index.js ./node_modules/fast-uri/index.js
 
+      # npm 6 (Node 10) honours the repo .npmrc `ignore-scripts=true` for
+      # `npm run` too, so `npm run test:unit` exits 0 having run nothing.
+      # Invoke the tape binary directly (same files as `tape test/**/*.js`).
       - name: Run tests
         run: |
-          npm run test:unit
+          if [ -n "$filter" ]; then node ./node_modules/.bin/tape $filter; else node ./node_modules/.bin/tape "test/**/*.js"; fi
         env:
           NODE_OPTIONS: no-network-family-autoselection
+          filter: ${{ inputs.test-filter }}
 
   test-browser:
     name: Test browser compatibility
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: ['ubuntu-latest', 'windows-latest', 'macos-latest']
+        # ubuntu-latest is now Ubuntu 26.04, which the release-time
+        # playwright-test/playwright-core does not support; pin 24.04.
+        os: ['ubuntu-24.04', 'windows-latest', 'macos-latest']
         browser: ['chromium', 'firefox', 'webkit']
         exclude:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             browser: webkit
     permissions:
       contents: read
@@ -93,14 +95,72 @@ jobs:
         run: |
           npm run test:browser:${{ matrix.browser }}
 
+  # Inlined from fastify/workflows/.github/workflows/plugins-ci.yml@v6 (test job):
+  # a reusable-workflow `uses:` job cannot carry timeout-minutes. The caller's
+  # lint/license-check gates are not carried over.
   test:
     needs:
       - test-regression-check-node10
+    name: Test (${{ matrix.os }}, node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     permissions:
-      contents: write
-      pull-requests: write
-    uses: fastify/workflows/.github/workflows/plugins-ci.yml@v6
-    with:
-      license-check: true
-      lint: true
-      node-versions: '["16", "18", "20", "22", "24"]'
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['16', '18', '20', '22', '24']
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        exclude:
+          - os: macos-latest
+            node-version: '16'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          check-latest: true
+
+      - name: Install dependencies
+        run: npm i --ignore-scripts
+
+      - name: Run tests
+        shell: bash
+        run: |
+          if [ -n "$filter" ]; then npx tape $filter; else npm test; fi
+        env:
+          filter: ${{ inputs.test-filter }}
+
+  pack:
+    needs:
+      - test
+      - test-browser
+      - test-regression-check-node10
+    name: Pack npm tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Pin npm to the publisher's version
+        run: npm i -g npm@11.13.0
+
+      - name: Pack
+        run: npm pack --ignore-scripts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: fast-uri-3.1.2.tgz
+          if-no-files-found: error
