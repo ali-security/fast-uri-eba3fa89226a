@@ -434,3 +434,48 @@ test('parse does not reject valid authority introducer patterns', (t) => {
     t.notOk(parsed.error, input)
   })
 })
+
+test('CVE-2026-76172: a scheme that decodes into reserved delimiters is rejected', (t) => {
+  const malformed = [
+    '%2f%2fevil.example:/pwn',
+    '%2F%2Fevil.example:/pwn',
+    'ht%74p%2f%2fevil.example:/x'
+  ]
+
+  t.plan(malformed.length * 3)
+
+  malformed.forEach((uri) => {
+    t.equal(fastURI.parse(uri).error, 'URI scheme is malformed.', `parse rejects ${uri}`)
+    t.equal(fastURI.normalize(uri), uri, `normalize preserves the failing input ${uri}`)
+    t.notEqual(fastURI.parse(fastURI.normalize(uri)).host, 'evil.example', `normalize does not create an evil.example authority from ${uri}`)
+  })
+})
+
+test('CVE-2026-76172: resolve throws when a component scheme decodes into delimiters', (t) => {
+  t.plan(3)
+  t.throws(
+    () => fastURI.resolve('%2f%2fevil.example:/pwn', 'child'),
+    /URI scheme is malformed/,
+    'resolve rejects a malformed base scheme'
+  )
+  t.throws(
+    () => fastURI.resolve('https://allowed.example/app/', '%2F%2Fevil.example:/pwn'),
+    /URI scheme is malformed/,
+    'resolve rejects a malformed relative scheme instead of emitting //evil.example'
+  )
+  t.throws(
+    () => fastURI.serialize({ scheme: '%2f%2fevil.example', path: '/pwn' }),
+    /URI scheme is malformed/,
+    'serialize rejects a component scheme that decodes to delimiters'
+  )
+})
+
+test('CVE-2026-76172: a scheme that decodes to a valid scheme is still accepted', (t) => {
+  t.plan(5)
+  t.equal(fastURI.parse('htt%70://example.com/').scheme, 'http', 'harmless encoded scheme decodes to http')
+  t.equal(fastURI.normalize('HTTP://example.com/'), 'http://example.com/', 'scheme is lowercased')
+  const wss = fastURI.parse('w%73s://example.com/chat')
+  t.equal(wss.scheme, 'wss', 'encoded wss scheme decodes')
+  t.equal(wss.secure, true, 'decoded scheme selects the wss handler')
+  t.equal(wss.resourceName, '/chat', 'wss handler builds the resource name')
+})
